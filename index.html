@@ -49,6 +49,8 @@ svg{display:block}
 #map{position:fixed;inset:0;background:var(--ground);z-index:0}
 .leaflet-container{font:inherit;background:var(--ground)}
 .leaflet-bottom{bottom:var(--sheet-h)}
+#map{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+.tiles-night{filter:invert(100%) hue-rotate(180deg) brightness(.9) contrast(.9) saturate(.65)}
 .leaflet-control-attribution{background:color-mix(in srgb,var(--panel) 80%,transparent)!important;color:var(--ink-2)!important;font-size:10px;border-radius:6px 0 0 0}
 .leaflet-control-attribution a{color:var(--ink-2)!important}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--panel);color:var(--ink);box-shadow:var(--shadow)}
@@ -269,7 +271,7 @@ body.navigating .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 190px)}
     <div class="pane" data-pane="plan">
       <div class="pane-head"><h3 class="label">Puntos</h3><button id="btnClear" class="link-btn">Borrar todo</button></div>
       <ol id="pointList" class="points"></ol>
-      <p class="hint" id="planHint">Toca el mapa para poner la salida y el destino, o busca un sitio arriba. Puedes arrastrar los puntos para cambiar la ruta.</p>
+      <p class="hint" id="planHint">Mantén el dedo pulsado sobre el mapa para poner la salida, el destino o una parada. También puedes buscar un sitio arriba. Puedes arrastrar los puntos para cambiar la ruta.</p>
       <button id="btnStartHere" class="btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>Salir desde mi ubicación</button>
       <h3 class="label">Tipo de ruta</h3>
       <div class="modes" id="modes">
@@ -290,7 +292,7 @@ body.navigating .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 190px)}
       <p class="hint">Sales y vuelves al mismo sitio por carreteras con curvas. Cada vez que lo generes saldrá un recorrido distinto.</p>
       <div class="field">
         <span class="badge start">S</span>
-        <div class="nm"><small style="display:block;font:600 11px var(--f-display);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)">Salida y llegada</small><span id="loopStartLabel">Toca el mapa o usa tu ubicación</span></div>
+        <div class="nm"><small style="display:block;font:600 11px var(--f-display);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)">Salida y llegada</small><span id="loopStartLabel">Mantén pulsado el mapa o usa tu ubicación</span></div>
         <button id="loopUseMe" class="btn" style="min-height:40px">Mi ubicación</button>
       </div>
       <h3 class="label">Distancia aproximada</h3>
@@ -571,8 +573,9 @@ const map=L.map('map',{zoomControl:false,preferCanvas:true,attributionControl:tr
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 const ATTR='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 const tiles={
-  light:L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:20,attribution:ATTR+' · © <a href="https://carto.com/attributions">CARTO</a> · Rutas: Valhalla/FOSSGIS'}),
-  dark:L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:20,attribution:ATTR+' · © <a href="https://carto.com/attributions">CARTO</a> · Rutas: Valhalla/FOSSGIS'}),
+  // CARTO tiles now need an API key, so the road map uses OpenStreetMap's own tiles; night mode is the same map darkened with a filter.
+  light:L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:ATTR+' · Rutas: Valhalla/FOSSGIS'}),
+  dark:L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,className:'tiles-night',attribution:ATTR+' · Rutas: Valhalla/FOSSGIS'}),
   topo:L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{subdomains:'abc',maxNativeZoom:17,maxZoom:20,attribution:ATTR+' · SRTM · © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA) · Rutas: Valhalla/FOSSGIS'})
 };
 let layerMode=LS.get(K.layer,'mapa'); if(!['mapa','relieve','oscuro'].includes(layerMode)) layerMode='mapa';
@@ -841,7 +844,7 @@ function renderMini(){
   const st=$('#status'), r=curRoute(), t=$('#miniTxt'), ch=$('#miniChev'), go=$('#miniNav');
   if(!st.hidden){ t.className='m-txt soft'; t.textContent=st.textContent; ch.hidden=true; go.hidden=true; return; }
   if(r){ t.className='m-txt'; t.textContent=`${fmtKm(r.length)} km · ${fmtDur(r.time)}`; ch.innerHTML=chevrons(r.a.rating); ch.hidden=false; go.hidden=false; }
-  else { t.className='m-txt soft'; t.textContent='Toca el mapa para elegir la salida y el destino.'; ch.hidden=true; go.hidden=true; }
+  else { t.className='m-txt soft'; t.textContent='Mantén pulsado el mapa para elegir la salida y el destino.'; ch.hidden=true; go.hidden=true; }
 }
 
 /* ================= external apps (CarPlay) ================= */
@@ -997,6 +1000,7 @@ $('#searchForm').addEventListener('submit',async e=>{
 document.addEventListener('pointerdown',e=>{ if(!resBox.hidden&&!e.target.closest('.topbar')) resBox.hidden=true; });
 
 /* ================= map tap popup ================= */
+let pointPopup=null;
 function openPointPopup(ll,label){
   if(nav.active) return;
   const div=document.createElement('div'); div.className='pop';
@@ -1004,9 +1008,25 @@ function openPointPopup(ll,label){
   const add=(txt,kind)=>{ const b=document.createElement('button'); b.className='btn'; b.textContent=txt; b.onclick=()=>setPoint(kind,ll,label); div.appendChild(b); };
   if(activeTab==='loop') add('Salida de la circular','loop');
   else { add('Salir de aquí','start'); if(plan.points.length&&!plan.loop) add('Añadir parada','stop'); add('Ir hasta aquí','end'); }
-  L.popup({closeButton:false,offset:[0,-6],autoPanPaddingTopLeft:[20,80],autoPanPaddingBottomRight:[20,(innerWidth<760?innerHeight-$('#sheet').getBoundingClientRect().top:0)+20]}).setLatLng(ll).setContent(div).openOn(map);
+  pointPopup=L.popup({closeButton:false,closeOnClick:false,offset:[0,-6],autoPanPaddingTopLeft:[20,80],autoPanPaddingBottomRight:[20,(innerWidth<760?innerHeight-$('#sheet').getBoundingClientRect().top:0)+20]}).setLatLng(ll).setContent(div).openOn(map);
 }
-map.on('click',e=>openPointPopup(e.latlng));
+// A normal tap only closes the menu; holding a finger on the map (or right-click on a computer) opens it.
+let lpTimer=0, lpStart=null, longPressAt=0, hintAt=0; const lpDown=new Set(); const mapEl=map.getContainer();
+mapEl.addEventListener('pointerdown',e=>{
+  lpDown.add(e.pointerId); clearTimeout(lpTimer); lpStart=null;
+  if(lpDown.size>1||nav.active||(e.pointerType==='mouse'&&e.button!==0)) return;
+  if(e.target.closest('.leaflet-marker-icon,.leaflet-popup,.leaflet-control')) return;
+  lpStart={x:e.clientX,y:e.clientY};
+  lpTimer=setTimeout(()=>{ if(!lpStart) return; const r=mapEl.getBoundingClientRect(); const ll=map.containerPointToLatLng([lpStart.x-r.left,lpStart.y-r.top]); lpStart=null; longPressAt=Date.now(); openPointPopup(ll); },500);
+});
+mapEl.addEventListener('pointermove',e=>{ if(lpStart&&Math.hypot(e.clientX-lpStart.x,e.clientY-lpStart.y)>10){ clearTimeout(lpTimer); lpStart=null; } });
+['pointerup','pointercancel'].forEach(t=>mapEl.addEventListener(t,e=>{ lpDown.delete(e.pointerId); clearTimeout(lpTimer); lpStart=null; }));
+map.on('contextmenu',e=>{ if(Date.now()-longPressAt<800) return; longPressAt=Date.now(); openPointPopup(e.latlng); });
+map.on('click',()=>{
+  if(Date.now()-longPressAt<800) return;
+  if(pointPopup&&pointPopup.isOpen()){ map.closePopup(pointPopup); return; }
+  if(!nav.active&&plan.points.length<2&&Date.now()-hintAt>8000){ hintAt=Date.now(); toast('Mantén el dedo pulsado sobre el mapa para añadir un punto.',2600); }
+});
 
 /* ================= location ================= */
 function locateOnce(){ return new Promise((res,rej)=>{ if(!navigator.geolocation) return rej(new Error('nogeo')); navigator.geolocation.getCurrentPosition(res,rej,{enableHighAccuracy:true,timeout:15000,maximumAge:20000}); }); }
@@ -1032,7 +1052,7 @@ $('#optFerries').onchange=e=>{ plan.opts.ferries=e.target.checked; savePlan(); i
 /* ================= loop tab ================= */
 function setLoopStart(p){ map.closePopup(); loop.start={lat:p.lat,lng:p.lng,label:p.label||'Punto en el mapa'}; saveLoop(); renderLoop(); drawMarkers(); if(!p.label||p.label==='Punto en el mapa') nameLater(loop.start); }
 function renderLoop(){
-  $('#loopStartLabel').textContent=loop.start?loop.start.label:'Toca el mapa o usa tu ubicación';
+  $('#loopStartLabel').textContent=loop.start?loop.start.label:'Mantén pulsado el mapa o usa tu ubicación';
   $$('#loopKm .chip').forEach(b=>b.setAttribute('aria-pressed',+b.dataset.km===loop.km));
   $$('#loopDir .chip').forEach(b=>b.setAttribute('aria-pressed',(b.dataset.dir===''?null:+b.dataset.dir)===loop.dir));
 }
@@ -1042,7 +1062,7 @@ $('#loopUseMe').onclick=async()=>{ try{ const p=await locateOnce(); const ll={la
 $('#btnLoop').onclick=makeLoop;
 $('#btnLoopAgain').onclick=makeLoop;
 async function makeLoop(){
-  const s=loop.start; if(!s){ toast('Elige la salida: toca el mapa o pulsa Mi ubicación.'); return; }
+  const s=loop.start; if(!s){ toast('Elige la salida: mantén pulsado el mapa o pulsa Mi ubicación.'); return; }
   const token=++calcToken; const target=loop.km*1000; let factor=1; const cands=[]; let lastErr=null;
   const base=loop.dir==null?Math.random()*360:loop.dir;
   $('#btnLoop').disabled=true;
