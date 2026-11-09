@@ -106,6 +106,12 @@ svg{display:block}
 .points{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
 .pt{display:flex;align-items:center;gap:10px;min-height:46px;padding:4px 4px 4px 8px;background:var(--panel-2);border-radius:12px}
 .pt .nm{flex:1;min-width:0}
+.points{position:relative}
+.drag-h{touch-action:none;cursor:grab;-webkit-user-select:none;user-select:none}
+.points.reordering{-webkit-user-select:none;user-select:none}
+.reo-line{position:absolute;left:0;right:0;height:4px;border-radius:2px;background:var(--accent);pointer-events:none;z-index:2}
+.pt.lifting{position:relative;z-index:3;box-shadow:var(--shadow);outline:2px solid var(--accent);cursor:grabbing}
+.pt.lifting .drag-h{color:var(--accent)}
 .pt .nm small{display:block;font:600 11px var(--f-display);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
 .pt .nm span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
 .badge{flex:none;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font:700 14px var(--f-display)}
@@ -271,6 +277,7 @@ body.navigating .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 190px)}
     <div class="pane" data-pane="plan">
       <div class="pane-head"><h3 class="label">Puntos</h3><button id="btnClear" class="link-btn">Borrar todo</button></div>
       <ol id="pointList" class="points"></ol>
+      <p class="fine" id="reorderHint" hidden>Para cambiar el orden, arrastra el icono ☰ de cada punto. En el mapa también puedes arrastrar cada marcador a otro sitio.</p>
       <p class="hint" id="planHint">Mantén el dedo pulsado sobre el mapa para poner la salida, el destino o una parada. También puedes buscar un sitio arriba. Puedes arrastrar los puntos para cambiar la ruta.</p>
       <button id="btnStartHere" class="btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5" fill="currentColor"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>Salir desde mi ubicación</button>
       <h3 class="label">Tipo de ruta</h3>
@@ -637,6 +644,7 @@ function renderPoints(){
   const ol=$('#pointList'); ol.innerHTML='';
   let stopN=0, legN=0;
   const legsOn=!plan.loop&&legModesActive(plan.points);
+  const nonVia=plan.points.filter(p=>p.kind!=='via').length;
   plan.points.forEach((p,i)=>{
     if(plan.loop&&p.kind==='end'&&samePt(p,plan.points[0])) return;
     if(legsOn&&i>0&&p.kind!=='via'){
@@ -646,18 +654,81 @@ function renderPoints(){
       leg.querySelector('select').onchange=e=>{ const v=e.target.value, q=Object.assign({},plan.points[i]); if(v===plan.mode) delete q.legMode; else q.legMode=v; plan.points[i]=q; savePlan(); renderPoints(); computePlan(); };
       ol.appendChild(leg);
     }
-    const li=document.createElement('li'); li.className='pt';
+    const li=document.createElement('li'); li.className='pt'+(p.kind==='via'?' via-row':''); li.dataset.i=i;
+    const canMove=!plan.loop&&p.kind!=='via'&&nonVia>=2;
     const badge=p.kind==='start'?'<span class="badge start">S</span>':p.kind==='end'?'<span class="badge end">D</span>':p.kind==='via'?'<span class="badge via"></span>':`<span class="badge stop">${++stopN}</span>`;
     const kt=plan.loop&&p.kind==='start'?'Salida y llegada':KIND_TXT[p.kind];
-    li.innerHTML=`${badge}<div class="nm"><small>${kt}</small><span>${esc(p.label||'Punto en el mapa')}</span></div><button class="icon-btn" aria-label="Quitar ${esc(kt)}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>`;
-    li.querySelector('button').onclick=()=>removePoint(i);
+    li.innerHTML=`${badge}<div class="nm"><small>${kt}</small><span>${esc(p.label||'Punto en el mapa')}</span></div><button class="icon-btn rm" aria-label="Quitar ${esc(kt)}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>${canMove?`<button class="icon-btn drag-h" aria-label="Mover ${esc(kt)} (arrastra, o usa las flechas arriba y abajo)"><svg viewBox="0 0 24 24"><path d="M5 8h14M5 12h14M5 16h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>`:''}`;
+    li.querySelector('.rm').onclick=()=>removePoint(i);
+    if(canMove){ const h=li.querySelector('.drag-h'); h.addEventListener('pointerdown',e=>startReorder(e,li,h)); h.addEventListener('keydown',e=>keyReorder(e,i)); }
     ol.appendChild(li);
   });
   $('#planHint').hidden=plan.points.length>=2;
+  $('#reorderHint').hidden=plan.loop||nonVia<3;
   $('#btnClear').hidden=!plan.points.length;
   $('.pane-head').hidden=!plan.points.length;
   $('#btnStartHere').hidden=plan.points.some(p=>p.kind==='start');
   $('#legNote').hidden=!legsOn;
+}
+// Change the order of start, stops and destination. Each leg keeps its route type by position (Tramo 1, Tramo 2…).
+function reorderPoints(order){
+  const nv=plan.points.filter(p=>p.kind!=='via');
+  const legModes=nv.slice(1).map(p=>p.legMode);
+  const hadVias=plan.points.length!==nv.length;
+  const np=order.map(i=>Object.assign({},plan.points[i]));
+  np.forEach((p,k)=>{ delete p.legMode; p.kind=k===0?'start':k===np.length-1?'end':'stop'; if(k>0&&legModes[k-1]) p.legMode=legModes[k-1]; });
+  const same=np.every((p,k)=>samePt(p,nv[k]));
+  if(same){ renderPoints(); return false; }
+  plan.points=np;
+  if(hadVias) toast('Orden cambiado. Los puntos de paso del trazado se han quitado.',3000);
+  afterPointsChange();
+  return true;
+}
+// Dragging keeps the list still: the lifted row follows the finger and a yellow line shows where it will drop.
+let reo=null;
+function startReorder(e,li,h){
+  if(e.pointerType==='mouse'&&e.button!==0) return;
+  e.preventDefault(); e.stopPropagation();
+  const ol=$('#pointList'), r0=li.getBoundingClientRect();
+  const rows=[...ol.querySelectorAll('.pt:not(.via-row)')];
+  const line=document.createElement('div'); line.className='reo-line'; line.hidden=true; ol.appendChild(line);
+  const b=li.querySelector('.badge'), sm=li.querySelector('.nm small');
+  reo={li,ol,line,grab:e.clientY-r0.top,id:e.pointerId,y:e.clientY,from:rows.indexOf(li),n:rows.length,others:rows.filter(x=>x!==li),target:rows.indexOf(li),badge:[b.className,b.textContent],small:sm?sm.textContent:''};
+  ol.classList.add('reordering'); li.classList.add('lifting');
+  try{ h.setPointerCapture(e.pointerId); }catch(err){}
+  const move=ev=>{ if(!reo||ev.pointerId!==reo.id) return; ev.preventDefault(); reo.y=ev.clientY; reoFrame(); };
+  const end=ev=>{ if(!reo||ev.pointerId!==reo.id) return; h.removeEventListener('pointermove',move); h.removeEventListener('pointerup',end); h.removeEventListener('pointercancel',end); finishReorder(ev.type==='pointercancel'); };
+  h.addEventListener('pointermove',move); h.addEventListener('pointerup',end); h.addEventListener('pointercancel',end);
+  if(navigator.vibrate) try{ navigator.vibrate(10); }catch(err){}
+  reoFrame();
+}
+function reoFrame(){
+  const {li,ol,line,others,n}=reo;
+  const body=$('#sheetBody'), br=body.getBoundingClientRect();
+  if(reo.y<br.top+44) body.scrollTop-=10; else if(reo.y>br.bottom-44) body.scrollTop+=10;
+  const want=reo.y-ol.getBoundingClientRect().top-reo.grab;
+  li.style.transform=`translateY(${want-li.offsetTop}px)`;
+  const center=want+li.offsetHeight/2;
+  const t=others.filter(x=>x.offsetTop+x.offsetHeight/2<center).length; reo.target=t;
+  if(t===reo.from){ line.hidden=true; }
+  else { line.hidden=false; const y=t<others.length?others[t].offsetTop-5:others[others.length-1].offsetTop+others[others.length-1].offsetHeight+1; line.style.top=y+'px'; }
+  const kind=t===0?'start':t===n-1?'end':'stop', b=li.querySelector('.badge'), sm=li.querySelector('.nm small');
+  b.className='badge '+kind; b.textContent=kind==='start'?'S':kind==='end'?'D':String(t); if(sm) sm.textContent=KIND_TXT[kind];
+}
+function finishReorder(cancel){
+  const {li,ol,line,others,target,from}=reo; reo=null;
+  line.remove(); li.style.transform=''; li.classList.remove('lifting'); ol.classList.remove('reordering');
+  if(cancel||target===from){ renderPoints(); return; }
+  const rows=others.slice(); rows.splice(target,0,li);
+  reorderPoints(rows.map(x=>+x.dataset.i));
+}
+function keyReorder(e,i){
+  if(e.key!=='ArrowUp'&&e.key!=='ArrowDown') return;
+  e.preventDefault();
+  const idx=plan.points.map((p,k)=>p.kind!=='via'?k:-1).filter(k=>k>=0), pos=idx.indexOf(i), to=pos+(e.key==='ArrowUp'?-1:1);
+  if(to<0||to>=idx.length) return;
+  [idx[pos],idx[to]]=[idx[to],idx[pos]];
+  if(reorderPoints(idx)){ const rows=[...$('#pointList').querySelectorAll('.pt:not(.via-row)')]; const h=rows[to]&&rows[to].querySelector('.drag-h'); if(h) h.focus(); }
 }
 function afterPointsChange(recalc=true){ savePlan(); renderPoints(); drawMarkers(); if(recalc) scheduleCalc(); }
 function breakLoop(){ if(!plan.loop) return; const s=plan.points[0]; plan.points=s?[Object.assign({},s,{kind:'start'})]:[]; plan.loop=false; }
@@ -1101,7 +1172,7 @@ function sheetState(){ return sheetEl.classList.contains('collapsed')?'collapsed
 function setSheet(st){ sheetEl.classList.toggle('collapsed',st==='collapsed'); sheetEl.classList.toggle('full',st==='full'); renderMini(); syncSheetH(); setTimeout(syncSheetH,300); }
 sheetEl.addEventListener('touchstart',e=>{
   drag=null;
-  if(innerWidth>=760||e.touches.length!==1||e.target.closest('input,select,textarea')) return;
+  if(innerWidth>=760||e.touches.length!==1||e.target.closest('input,select,textarea,.drag-h')) return;
   const inBody=!!e.target.closest('.sheet-body');
   if(inBody&&bodyEl.scrollTop>2) return;
   drag={y0:e.touches[0].clientY,dy:0,active:false,inBody,st:sheetState()};
@@ -1294,7 +1365,7 @@ const last=LS.get(K.last,null);
 if(last&&last.shape&&plan.points.length>=2&&last.points&&samePt(last.points[0],plan.points[0])&&samePt(last.points[last.points.length-1],plan.points[plan.points.length-1])){ try{ const r=unpack(last); setRoutes([r],0,false); }catch(e){ scheduleCalc(); } }
 else if(plan.points.length>=2) scheduleCalc();
 drawMarkers(); renderMini(); syncSheetH();
-window.__curvas={routeLegs,stitch,setSheet,sheetState,decode6,encode6,finalize,toRoute,sampleVias,googleUrl,appleUrl,toGpx,parseGpx,manIcon,snapToRoute,state,plan,setRoutes,onNavPos,startNav,stopNav,nav};
+window.__curvas={reorderPoints,routeLegs,stitch,setSheet,sheetState,decode6,encode6,finalize,toRoute,sampleVias,googleUrl,appleUrl,toGpx,parseGpx,manIcon,snapToRoute,state,plan,setRoutes,onNavPos,startNav,stopNav,nav};
 })();
 </script>
 </body>
