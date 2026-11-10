@@ -187,6 +187,18 @@ svg{display:block}
 .save-form{display:flex;gap:8px}
 .save-form input{flex:1;min-width:0;height:46px;padding:0 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--panel);color:var(--ink);font:500 16px var(--f-body)}
 
+.ext-list{display:flex;flex-direction:column;gap:6px}
+.ext{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;min-height:58px;padding:8px 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--panel-2);color:var(--ink);text-decoration:none}
+.ext-n{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:var(--panel);box-shadow:inset 0 0 0 2px var(--ink-2);font:700 15px var(--f-display);font-variant-numeric:tabular-nums}
+.ext-t{min-width:0}
+.ext-t b{display:block;font:600 15px/1.25 var(--f-body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ext-t small{display:block;margin-top:2px;font-size:12.5px;line-height:1.3;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.ext-go{font:700 15px var(--f-display);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2)}
+.ext.next{border-color:var(--accent);background:var(--accent-soft)}
+.ext.next .ext-n{background:var(--accent);color:var(--accent-ink);box-shadow:none}
+.ext.next .ext-go{color:var(--ink)}
+.ext.done .ext-n{background:var(--ink);color:var(--panel);box-shadow:none}
+.ext.done .ext-t,.ext.done .ext-go{opacity:.6}
 .saved{display:flex;flex-direction:column;gap:6px}
 .srow{display:flex;align-items:center;gap:6px;padding:4px 4px 4px 0;border-bottom:1px solid var(--line)}
 .srow .open{flex:1;min-width:0;display:block;text-align:left;border:0;background:none;padding:8px 6px}
@@ -362,11 +374,13 @@ body.navigating .toast{bottom:calc(env(safe-area-inset-bottom,0px) + 190px)}
         <button class="btn primary" type="submit">Guardar</button>
       </form>
       <h3 class="label">Llevar a CarPlay</h3>
-      <div class="row-btns">
-        <a id="lnkGoogle" class="btn" target="_blank" rel="noopener">Google Maps</a>
-        <a id="lnkApple" class="btn" target="_blank" rel="noopener">Apple Maps</a>
+      <div class="chips" id="extTabs">
+        <button class="chip" data-app="google" aria-pressed="true">Google Maps</button>
+        <button class="chip" data-app="apple" aria-pressed="false">Apple Maps</button>
+        <button class="chip" data-app="waze" aria-pressed="false">Waze</button>
       </div>
-      <p class="fine">Abre la ruta con puntos de paso en Google Maps o Apple Maps (iOS 18.4 o posterior), que funcionan en CarPlay. Esos navegadores recalculan entre los puntos, así que el trazado puede cambiar un poco. Si Google Maps se abre en Safari en lugar de en la app, solo usa 3 puntos de paso.</p>
+      <div id="extList" class="ext-list"></div>
+      <p class="fine" id="extNote"></p>
       <p class="fine" id="rNote">Rutas calculadas con datos de OpenStreetMap. Revisa el trazado antes de salir.</p>
     </section>
   </div>
@@ -900,8 +914,7 @@ function renderResult(){
       b.onclick=()=>selectRoute(i); alts.appendChild(b);
     });
   }
-  $('#lnkGoogle').href=googleUrl(r);
-  $('#lnkApple').href=appleUrl(r);
+  renderExport(r);
   $('#btnLoopAgain').hidden=!(r.loop&&activeTab==='loop');
   $('#saveForm').hidden=true;
   $('#rNote').textContent=r.source==='gpx'?'Track importado: se navega siguiendo la línea, sin indicaciones de giro.':'Rutas calculadas con datos de OpenStreetMap. Revisa el trazado antes de salir.';
@@ -919,35 +932,142 @@ function renderMini(){
 }
 
 /* ================= external apps (CarPlay) ================= */
-function sampleVias(r,max){
-  const total=r.total; if(total<1500) return [];
-  const must=r.legEnds.slice(0,-1).map(i=>r.cum[i]);
-  const manD=r.maneuvers.map(m=>r.cum[Math.min(m.idx,r.cum.length-1)]);
-  const picks=must.slice(0,max); const slots=Math.max(0,max-picks.length);
-  for(let k=1;k<=slots;k++){
-    let d=total*k/(slots+1);
-    for(let t=0;t<6;t++){ const near=manD.find(x=>Math.abs(x-d)<250); if(near===undefined) break; d=near+(d>=near?260:-260); }
-    picks.push(Math.min(total-400,Math.max(400,d)));
+// Google Maps and Apple Maps take at most 9 waypoints per link and pick their own roads between them.
+// To keep them on our route: long routes are split into parts, parts break where the route type changes
+// (so "avoid highways" can be set per part), and waypoints go where the route bends away from the straight line.
+const EXT_GAP=12000, EXT_MAX=9;
+function legInfo(r){
+  const nv=[]; r.points.forEach((p,k)=>{ if(p.kind!=='via') nv.push({p,d:r.pointAlong[k]}); });
+  const modeOf=p=>r.source==='gpx'?'any':r.loop?'curvas':((p&&p.legMode)||r.mode||'curvas');
+  if(nv.length<2) return {stops:[],legs:[{from:0,to:r.total,mode:modeOf(null)}]};
+  nv[0].d=0; nv[nv.length-1].d=r.total;
+  const legs=[]; for(let j=1;j<nv.length;j++) legs.push({from:nv[j-1].d,to:nv[j].d,mode:modeOf(nv[j].p)});
+  return {stops:nv.slice(1,-1).map(o=>({d:o.d,label:o.p.label||''})),legs};
+}
+function toXY(p,lat0){ return [p[1]*RAD*EARTH*Math.cos(lat0*RAD),p[0]*RAD*EARTH]; }
+function segDev(r,dA,dB){
+  const A=pointAt(r.shape,r.cum,dA), B=pointAt(r.shape,r.cum,dB), lat0=(A[0]+B[0])/2;
+  const a=toXY(A,lat0), b=toXY(B,lat0), dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+  let best=0, at=(dA+dB)/2;
+  const i0=idxAt(r.cum,dA)+1, i1=idxAt(r.cum,dB), step=Math.max(1,Math.floor((i1-i0)/1500));
+  for(let i=i0;i<=i1;i+=step){ const q=toXY(r.shape[i],lat0); let t=L2>0?((q[0]-a[0])*dx+(q[1]-a[1])*dy)/L2:0; t=t<0?0:t>1?1:t; const e=Math.hypot(a[0]+dx*t-q[0],a[1]+dy*t-q[1]); if(e>best){ best=e; at=r.cum[i]; } }
+  return {dev:best,at};
+}
+function nudge(d,manD,lo,hi){ for(let t=0;t<6;t++){ const near=manD.find(x=>Math.abs(x-d)<250); if(near===undefined) break; d=near+(d>=near?260:-260); } return Math.min(hi-800,Math.max(lo+800,d)); }
+function fillPoints(r,a,b,fixed,budget,manD){
+  const evalSeg=(x,y)=>{ const len=y-x; if(len<4000) return {a:x,b:y,score:0}; const sd=segDev(r,x,y); let split=sd.dev>Math.max(400,0.08*len)?sd.at:(x+y)/2; split=Math.min(y-1500,Math.max(x+1500,split)); return {a:x,b:y,score:sd.dev+0.1*len,split}; };
+  const pts=[a,...fixed,b], segs=[], added=[];
+  for(let i=0;i<pts.length-1;i++) segs.push(evalSeg(pts[i],pts[i+1]));
+  while(added.length<budget){
+    let bi=-1,bs=0; segs.forEach((sg,i)=>{ if(sg.score>bs){ bs=sg.score; bi=i; } }); if(bi<0) break;
+    const sg=segs[bi], d=nudge(sg.split,manD,sg.a,sg.b); added.push(d); segs.splice(bi,1,evalSeg(sg.a,d),evalSeg(d,sg.b));
   }
-  picks.sort((a,b)=>a-b);
-  const out=[]; for(const d of picks){ if(out.length&&d-out[out.length-1]<1200) continue; out.push(d); }
-  return out.slice(0,max).map(d=>pointAt(r.shape,r.cum,d));
+  return added;
+}
+function destLabel(r){ const nv=r.points.filter(p=>p.kind!=='via'); const e=nv[nv.length-1]; return (e&&e.label)||''; }
+const vagueLabel=l=>!l||/^(Punto en el mapa|Punto de paso|Final del track|Inicio del track|Rodeo)$/.test(l);
+function planExport(r){
+  if(r._parts) return r._parts;
+  const {stops,legs}=legInfo(r), total=r.total, manD=r.maneuvers.map(m=>r.cum[Math.min(m.idx,r.cum.length-1)]);
+  const kind=m=>m==='rapida'?'fast':m==='any'?'any':'slow';
+  const blocks=[0]; for(let j=1;j<legs.length;j++) if(kind(legs[j].mode)!==kind(legs[j-1].mode)) blocks.push(legs[j].from); blocks.push(total);
+  const cuts=[0];
+  for(let k=0;k<blocks.length-1;k++){
+    const A=blocks[k], B=blocks[k+1], inB=stops.filter(st=>st.d>A+1&&st.d<B-1);
+    for(let P=Math.max(1,Math.ceil((B-A)/(EXT_GAP*(EXT_MAX+1))));P<=40;P++){
+      const L=(B-A)/P, c=[A];
+      for(let q=1;q<P;q++){ let x=A+L*q; const near=inB.reduce((bst,st)=>Math.abs(st.d-x)<Math.abs(bst-x)?st.d:bst,Infinity); x=Math.abs(near-x)<0.3*L?near:nudge(x,manD,c[c.length-1]+1000,B-1000); if(x>c[c.length-1]+1000) c.push(x); }
+      c.push(B);
+      if(c.slice(1).every((y,i)=>inB.filter(st=>st.d>c[i]+1&&st.d<y-1).length<=EXT_MAX)){ cuts.push(...c.slice(1)); break; }
+    }
+  }
+  const n=cuts.length-1;
+  r._parts=cuts.slice(1).map((b,i)=>{
+    const a=cuts[i], fixed=stops.filter(st=>st.d>a+1&&st.d<b-1).map(st=>st.d);
+    const wps=fixed.concat(fillPoints(r,a,b,fixed,EXT_MAX-fixed.length,manD)).sort((x,y)=>x-y);
+    const ml=legs.filter(l=>Math.min(l.to,b)-Math.max(l.from,a)>500).map(l=>l.mode);
+    const endStop=stops.find(st=>Math.abs(st.d-b)<1);
+    return {i,n,a,b,wps,mode:ml.includes('rapida')?'rapida':ml.includes('any')?'any':'slow',label:i===n-1?destLabel(r):(endStop?endStop.label:'')};
+  });
+  return r._parts;
+}
+function wazePlan(r){
+  if(r._waze) return r._waze;
+  const {stops,legs}=legInfo(r), total=r.total, manD=r.maneuvers.map(m=>r.cum[Math.min(m.idx,r.cum.length-1)]);
+  const want=Math.min(18,Math.max(stops.length,Math.round(total/20000)-1));
+  const extra=fillPoints(r,0,total,stops.map(st=>st.d),want-stops.length,manD);
+  const items=stops.map(st=>({d:st.d,label:st.label,stop:true})).concat(extra.map(d=>({d,label:''}))).sort((x,y)=>x.d-y.d);
+  items.push({d:total,label:destLabel(r),stop:true,end:true});
+  r._waze=items.map(o=>{ const leg=legs.find(l=>o.d>l.from+1&&o.d<=l.to+1)||legs[legs.length-1]; return Object.assign(o,{pt:pointAt(r.shape,r.cum,Math.min(o.d,total-1)),mode:leg.mode}); });
+  return r._waze;
 }
 const llTxt=p=>p[0].toFixed(5)+','+p[1].toFixed(5);
-function avoidList(r,apple){ const a=[]; if(r.mode&&r.mode!=='rapida') a.push('highways'); if(r.opts&&r.opts.tolls) a.push('tolls'); if(!apple&&r.opts&&r.opts.ferries) a.push('ferries'); return a; }
-function googleUrl(r){
-  const u=new URLSearchParams({api:'1',origin:llTxt(r.shape[0]),destination:llTxt(r.shape[r.shape.length-1]),travelmode:'driving',dir_action:'navigate'});
-  const v=sampleVias(r,9); if(v.length) u.set('waypoints',v.map(llTxt).join('|'));
-  const av=avoidList(r,false); if(av.length) u.set('avoid',av.join(','));
+function googlePartUrl(r,part){
+  const u=new URLSearchParams({api:'1',destination:llTxt(pointAt(r.shape,r.cum,part.b)),travelmode:'driving',dir_action:'navigate'});
+  if(part.i===0) u.set('origin',llTxt(r.shape[0]));
+  if(part.wps.length) u.set('waypoints',part.wps.map(d=>llTxt(pointAt(r.shape,r.cum,d))).join('|'));
+  const av=[]; if(part.mode==='slow') av.push('highways'); if(r.opts&&r.opts.tolls) av.push('tolls'); if(r.opts&&r.opts.ferries) av.push('ferries');
+  if(av.length) u.set('avoid',av.join(','));
   return 'https://www.google.com/maps/dir/?'+u.toString();
 }
-function appleUrl(r){
-  const u=new URLSearchParams({source:llTxt(r.shape[0]),destination:llTxt(r.shape[r.shape.length-1]),mode:'driving'});
-  sampleVias(r,10).forEach(p=>u.append('waypoint',llTxt(p)));
-  const av=avoidList(r,true); if(av.length) u.set('avoid',av.join(','));
+function applePartUrl(r,part){
+  const u=new URLSearchParams({destination:llTxt(pointAt(r.shape,r.cum,part.b)),mode:'driving'});
+  if(part.i===0) u.set('source',llTxt(r.shape[0]));
+  part.wps.forEach(d=>u.append('waypoint',llTxt(pointAt(r.shape,r.cum,d))));
+  const av=[]; if(part.mode==='slow') av.push('highways'); if(r.opts&&r.opts.tolls) av.push('tolls');
+  if(av.length) u.set('avoid',av.join(','));
   return 'https://maps.apple.com/directions?'+u.toString();
 }
-
+function wazeUrl(r,it){
+  const u=new URLSearchParams({ll:llTxt(it.pt),navigate:'yes',vehicle_type:'motorcycle',avoid_freeways:it.mode==='rapida'||it.mode==='any'?'false':'true'});
+  if(r.opts&&r.opts.tolls) u.set('avoid_tolls','true'); if(r.opts&&r.opts.ferries) u.set('avoid_ferries','true');
+  return 'https://www.waze.com/ul?'+u.toString();
+}
+const nameCache=new Map();
+function placeName(p){
+  const k=p[0].toFixed(3)+','+p[1].toFixed(3); if(nameCache.has(k)) return nameCache.get(k);
+  const pr=gated('nominatim',1100,()=>getJSON(`${NOMINATIM}/reverse?format=jsonv2&lat=${p[0].toFixed(5)}&lon=${p[1].toFixed(5)}&zoom=14&accept-language=es`,15000))
+    .then(j=>{ const a=(j&&j.address)||{}; return a.village||a.town||a.city||a.hamlet||a.municipality||a.suburb||''; }).catch(()=>'');
+  nameCache.set(k,pr); return pr;
+}
+let extApp=LS.get('curvas:ext','google'); if(!['google','apple','waze'].includes(extApp)) extApp='google';
+const extDone=new Set();
+const MODE_NOTE={slow:'evita autopistas',rapida:'con autopistas',any:'track importado'};
+function renderExport(r){
+  $$('#extTabs .chip').forEach(b=>b.setAttribute('aria-pressed',b.dataset.app===extApp));
+  const box=$('#extList'); box.innerHTML='';
+  const rows=[];
+  if(extApp==='waze'){
+    const items=wazePlan(r);
+    items.forEach((it,k)=>{
+      const title=it.end?(r.loop?'Llegada':'Destino'):it.stop?'Parada':'Punto de paso';
+      rows.push({href:wazeUrl(r,it),title,name:it.label,pt:it.pt,sub:`km ${Math.round(it.d/1000)} · ${it.mode==='rapida'?'con autopistas':it.mode==='any'?'':'evita autopistas'}`.replace(/ · $/,'')});
+    });
+  } else {
+    const parts=planExport(r);
+    parts.forEach(pt=>{
+      rows.push({href:extApp==='google'?googlePartUrl(r,pt):applePartUrl(r,pt),title:pt.n>1?`Parte ${pt.i+1} de ${pt.n}`:'Ruta completa',name:pt.label,pt:pointAt(r.shape,r.cum,pt.b),prefix:'hasta ',
+        sub:`km ${Math.round(pt.a/1000)}–${Math.round(pt.b/1000)} · ${pt.wps.length} puntos de paso · ${MODE_NOTE[pt.mode]}`});
+    });
+  }
+  const keyBase=r.id+':'+extApp+':';
+  const firstOpen=rows.findIndex((x,k)=>!extDone.has(keyBase+k));
+  rows.forEach((row,k)=>{
+    const a=document.createElement('a'); a.className='ext'+(extDone.has(keyBase+k)?' done':k===firstOpen&&rows.length>1?' next':''); a.href=row.href; a.target='_blank'; a.rel='noopener';
+    a.innerHTML=`<span class="ext-n">${extDone.has(keyBase+k)?'✓':k+1}</span><span class="ext-t"><b><span class="et">${esc(row.title)}</span><span class="en"></span></b><small>${esc(row.sub)}</small></span><span class="ext-go">Abrir</span>`;
+    const en=a.querySelector('.en'), setName=nm=>{ if(nm) en.textContent=' · '+(row.prefix||'')+nm; };
+    if(!vagueLabel(row.name)) setName(row.name); else placeName(row.pt).then(nm=>{ if(a.isConnected) setName(nm); });
+    a.addEventListener('click',()=>{ extDone.add(keyBase+k); setTimeout(()=>{ const cr=curRoute(); if(cr) renderExport(cr); },400); });
+    box.appendChild(a);
+  });
+  const many=rows.length>1;
+  $('#extNote').textContent=extApp==='waze'
+    ? 'Waze no acepta rutas con paradas: va a un punto cada vez y elige él la carretera. Abre el primero y, al llegar, vuelve aquí y toca el siguiente. Van en modo moto y evitando autopistas, salvo en los tramos Rápida.'
+    : (many?`${extApp==='google'?'Google Maps':'Apple Maps'} admite 9 puntos de paso por enlace, así que la ruta va en ${rows.length} partes. Abre la Parte 1 y, al terminarla, vuelve aquí y abre la siguiente: arranca desde donde estés. `:'')
+      +'Entre dos puntos de paso el navegador elige su carretera, así que el trazado puede variar un poco. Cada punto de paso le cuenta como una parada: sigue sin parar.'
+      +(extApp==='apple'?' Necesita iOS 18.4 o posterior.':' Si Google Maps se abre en Safari en lugar de en la app, solo usa 3 puntos de paso.');
+}
+$$('#extTabs .chip').forEach(b=>b.onclick=()=>{ extApp=b.dataset.app; LS.set('curvas:ext',extApp); const r=curRoute(); if(r) renderExport(r); });
 /* ================= GPX & files ================= */
 function safeName(s){ return (s||'ruta').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').slice(0,60)||'ruta'; }
 function toGpx(r){
@@ -1365,7 +1485,7 @@ const last=LS.get(K.last,null);
 if(last&&last.shape&&plan.points.length>=2&&last.points&&samePt(last.points[0],plan.points[0])&&samePt(last.points[last.points.length-1],plan.points[plan.points.length-1])){ try{ const r=unpack(last); setRoutes([r],0,false); }catch(e){ scheduleCalc(); } }
 else if(plan.points.length>=2) scheduleCalc();
 drawMarkers(); renderMini(); syncSheetH();
-window.__curvas={reorderPoints,routeLegs,stitch,setSheet,sheetState,decode6,encode6,finalize,toRoute,sampleVias,googleUrl,appleUrl,toGpx,parseGpx,manIcon,snapToRoute,state,plan,setRoutes,onNavPos,startNav,stopNav,nav};
+window.__curvas={reorderPoints,routeLegs,stitch,setSheet,sheetState,decode6,encode6,finalize,toRoute,planExport,wazePlan,googlePartUrl,applePartUrl,wazeUrl,legInfo,toGpx,parseGpx,manIcon,snapToRoute,state,plan,setRoutes,onNavPos,startNav,stopNav,nav};
 })();
 </script>
 </body>
